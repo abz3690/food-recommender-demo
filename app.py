@@ -258,11 +258,52 @@ def format_food_table(df: pd.DataFrame, group: bool = False) -> pd.DataFrame:
     return out[keep].rename(columns=rename)
 
 
+def selected_cuisine_notice(
+    result: pd.DataFrame,
+    selected_cuisines: list[str] | None,
+    selected_dish_types: list[str] | None = None,
+    requested_top_k: int | None = None,
+) -> None:
+    """Explain fallback when selected filters cannot fill all Top-K results."""
+    if result is None or result.empty:
+        return
+
+    messages = []
+
+    if selected_cuisines and "cuisine_group" in result.columns:
+        selected = {str(x).strip() for x in selected_cuisines if str(x).strip()}
+        shown = {str(x).strip() for x in result["cuisine_group"].dropna().astype(str).unique() if str(x).strip()}
+        outside = shown - selected
+        if selected and outside:
+            selected_text = ", ".join(sorted(selected))
+            messages.append(
+                f"Dữ liệu món thuộc nhóm {selected_text} hiện chưa đủ để trả đủ số lượng gợi ý."
+            )
+
+    if selected_dish_types and "dish_type" in result.columns:
+        selected_types = {str(x).strip() for x in selected_dish_types if str(x).strip()}
+        shown_types = {str(x).strip() for x in result["dish_type"].dropna().astype(str).unique() if str(x).strip()}
+        outside_types = shown_types - selected_types
+        if selected_types and outside_types:
+            messages.append("Một số kết quả đã được nới kiểu món vì dữ liệu đúng toàn bộ tiêu chí còn ít.")
+
+    if requested_top_k and len(result) < requested_top_k:
+        messages.append(
+            f"Hiện chỉ có {len(result)} món phù hợp đủ điều kiện trong dữ liệu demo."
+        )
+
+    if messages:
+        st.info(
+            " ".join(messages)
+            + " Hệ thống ưu tiên tiêu chí bạn chọn trước; nếu dữ liệu quá ít mới nới tiêu chí để tránh danh sách bị trống."
+        )
+
+
 st.markdown("""
 <div class="hero">
   <span class="hero-kicker">🍜 HANOI FOOD MATCH</span>
   <h1>Hôm nay ăn gì?</h1>
-  <p>Tìm món phù hợp cho riêng bạn hoặc cân bằng sở thích của hai người — theo khẩu vị, ngân sách và khu vực.</p>
+  <p>Tìm món phù hợp cho riêng bạn hoặc cân bằng sở thích của hai người — theo khẩu vị, mức giá và nhóm ẩm thực.</p>
   <div class="hero-note">Chọn vài sở thích cơ bản, hệ thống sẽ gợi ý món ăn và quán phù hợp cho bạn.</div>
 </div>
 """, unsafe_allow_html=True)
@@ -345,7 +386,7 @@ with personal_tab:
         st.caption("Chọn nhanh một vài tiêu chí. Nếu để trống, hệ thống sẽ gợi ý các món phù hợp chung trong khảo sát.")
 
         cuisine_vi = {
-            "Vietnamese": "Việt Nam", "Chinese/Taiwanese": "Trung Hoa/Đài Loan",
+            "Vietnamese": "Việt Nam", "Chinese/Taiwanese": "Trung Quốc/Đài Loan",
             "Japanese": "Nhật Bản", "Korean": "Hàn Quốc", "Thai": "Thái Lan",
             "Western/European": "Âu/Mỹ", "Indian": "Ấn Độ", "Indonesian": "Indonesia",
         }
@@ -422,6 +463,9 @@ with personal_tab:
                 main_meal_only=main_only,
             )
             st.session_state["personal_result"] = result
+            st.session_state["personal_selected_cuisines"] = [cuisine_display[x] for x in cuisines_label]
+            st.session_state["personal_selected_dish_types"] = [type_display[x] for x in types_label]
+            st.session_state["personal_requested_top_k"] = top_k
 
     else:
         st.caption("Dành cho người dùng đã có lịch sử đánh giá trong dữ liệu thử nghiệm.")
@@ -442,12 +486,21 @@ with personal_tab:
                 exclude_seen=exclude_seen,
             )
             st.session_state["personal_result"] = result
+            st.session_state["personal_selected_cuisines"] = cuisines
+            st.session_state["personal_selected_dish_types"] = []
+            st.session_state["personal_requested_top_k"] = top_k
 
     result = st.session_state.get("personal_result")
     if result is not None:
         if result.empty:
             st.warning("Không tìm thấy kết quả phù hợp. Hãy nới bớt bộ lọc.")
         else:
+            selected_cuisine_notice(
+                result,
+                st.session_state.get("personal_selected_cuisines", []),
+                st.session_state.get("personal_selected_dish_types", []),
+                st.session_state.get("personal_requested_top_k"),
+            )
             st.markdown("### Gợi ý nổi bật")
             for _, row in result.head(3).iterrows():
                 score = float(row.get("hybrid_score", 0)) * 100
@@ -486,7 +539,7 @@ with group_tab:
     if group_mode == "Chưa có lịch sử":
         # Human-friendly labels for fast cold-start onboarding.
         cuisine_vi = {
-            "Vietnamese": "Việt Nam", "Chinese/Taiwanese": "Trung Hoa/Đài Loan",
+            "Vietnamese": "Việt Nam", "Chinese/Taiwanese": "Trung Quốc/Đài Loan",
             "Japanese": "Nhật Bản", "Korean": "Hàn Quốc", "Thai": "Thái Lan",
             "Western/European": "Âu/Mỹ", "Indian": "Ấn Độ", "Indonesian": "Indonesia",
         }
@@ -517,7 +570,6 @@ with group_tab:
             "Đồ cay": ["cay", "spicy"], "Đồ chiên": ["chiên", "rán", "fried"],
         }
 
-        st.markdown('<div class="quick-note">Chỉ cần chọn vài ô nổi bật nhất. Mỗi người mất khoảng 20–30 giây, không cần tìm từng món cụ thể.</div>', unsafe_allow_html=True)
 
         def quick_profile(person_key: str, title: str):
             st.markdown(f'<div class="preference-card"><h4>{title}</h4>', unsafe_allow_html=True)
@@ -569,11 +621,16 @@ with group_tab:
         if st.button(
             "💗 Tìm món hợp với cả hai", type="primary", use_container_width=True, disabled=not enough_info
         ):
+            selected_cuisines = sorted(set(profile_a["preferred_cuisines"] + profile_b["preferred_cuisines"]))
+            selected_dish_types = sorted(set(profile_a["preferred_dish_types"] + profile_b["preferred_dish_types"]))
             result = system.group_recommend_new_users(
                 [profile_a, profile_b], strategy=strategy_map[strategy_label],
                 top_k=group_top_k, main_meal_only=True,
             )
             st.session_state["group_result"] = result
+            st.session_state["group_selected_cuisines"] = selected_cuisines
+            st.session_state["group_selected_dish_types"] = selected_dish_types
+            st.session_state["group_requested_top_k"] = group_top_k
 
     else:
         users = system.eligible_users
@@ -596,12 +653,21 @@ with group_tab:
                 main_meal_only=True,
             )
             st.session_state["group_result"] = result
+            st.session_state["group_selected_cuisines"] = group_cuisines
+            st.session_state["group_selected_dish_types"] = []
+            st.session_state["group_requested_top_k"] = group_top_k
 
     group_result = st.session_state.get("group_result")
     if group_result is not None:
         if group_result.empty:
             st.warning("Không tìm thấy món chung phù hợp với bộ lọc hiện tại.")
         else:
+            selected_cuisine_notice(
+                group_result,
+                st.session_state.get("group_selected_cuisines", []),
+                st.session_state.get("group_selected_dish_types", []),
+                st.session_state.get("group_requested_top_k"),
+            )
             st.markdown("### Những món hợp với cả hai")
             for _, row in group_result.head(3).iterrows():
                 score = float(row.get("group_score", 0)) * 100

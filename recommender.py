@@ -196,7 +196,7 @@ class RecommendationSystem:
         top_k: int = 10,
         main_meal_only: bool = True,
     ) -> pd.DataFrame:
-        scores = self.new_user_score_table(
+        scores_all = self.new_user_score_table(
             liked_food_ids=liked_food_ids,
             disliked_food_ids=disliked_food_ids,
             preferred_cuisines=preferred_cuisines,
@@ -205,24 +205,40 @@ class RecommendationSystem:
             preferred_spicy_levels=preferred_spicy_levels,
             excluded_keywords=excluded_keywords,
         )
-        # For cold-start users, cuisine/type/price/spicy inputs should guide ranking,
-        # not act as hard filters. Hard filtering easily produces no result when
-        # users pick a combination that is sparse in the demo dataset.
-        scores = self._filter_scores(
-            scores, self.build_candidate_catalog(main_meal_only), preferred_cuisines=None
+
+        base_scores = self._filter_scores(
+            scores_all, self.build_candidate_catalog(main_meal_only), preferred_cuisines=None
         )
-        if scores.empty and main_meal_only:
-            # Fallback: allow all dish types instead of returning an empty screen.
-            scores = self.new_user_score_table(
-                liked_food_ids=liked_food_ids,
-                disliked_food_ids=disliked_food_ids,
-                preferred_cuisines=preferred_cuisines,
-                preferred_dish_types=preferred_dish_types,
-                preferred_prices=preferred_prices,
-                preferred_spicy_levels=preferred_spicy_levels,
-                excluded_keywords=excluded_keywords,
-            )
-            scores = self._filter_scores(scores, self.build_candidate_catalog(False), preferred_cuisines=None)
+        if base_scores.empty and main_meal_only:
+            base_scores = self._filter_scores(scores_all, self.build_candidate_catalog(False), preferred_cuisines=None)
+
+        def keep_by_metadata(frame: pd.DataFrame, column: str, values: Sequence[str] | None) -> pd.DataFrame:
+            if not values or column not in self.foods_model.columns or frame.empty:
+                return frame
+            allowed = {str(v).strip().lower() for v in values if str(v).strip()}
+            lookup = self.foods_model[["food_id", column]].copy()
+            lookup["food_id"] = lookup["food_id"].astype(str)
+            lookup["_value"] = lookup[column].astype(str).str.strip().str.lower()
+            allowed_ids = set(lookup.loc[lookup["_value"].isin(allowed), "food_id"])
+            return frame[frame["food_id"].astype(str).isin(allowed_ids)]
+
+        # Cold-start inputs are treated as real preferences in priority order.
+        # Try exact cuisine + dish type first; if the demo data is too sparse,
+        # relax only the later condition instead of immediately showing unrelated cuisine.
+        strict_scores = keep_by_metadata(base_scores, "cuisine_group", preferred_cuisines)
+        strict_scores = keep_by_metadata(strict_scores, "dish_type", preferred_dish_types)
+
+        cuisine_scores = keep_by_metadata(base_scores, "cuisine_group", preferred_cuisines)
+        type_scores = keep_by_metadata(base_scores, "dish_type", preferred_dish_types)
+
+        if not strict_scores.empty:
+            scores = strict_scores
+        elif preferred_cuisines and not cuisine_scores.empty:
+            scores = cuisine_scores
+        elif preferred_dish_types and not type_scores.empty:
+            scores = type_scores
+        else:
+            scores = base_scores
         excluded = set(map(str, (liked_food_ids or []))) | set(map(str, (disliked_food_ids or [])))
         scores = scores[~scores["food_id"].isin(excluded)]
         metadata_cols = [c for c in [
